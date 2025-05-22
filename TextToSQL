@@ -144,7 +144,8 @@ class TextToSQLBot:
         table_texts = []
         for table in self.table_metadata:
             text = f"Table: {table['table_name']} | Description: {table['description']} | "
-            text += f"Columns: {', '.join([f\"{col['name']} ({col['type']})\" for col in table['columns']])}"
+            columns_text = ', '.join([f"{col['name']} ({col['type']})" for col in table['columns']])
+            text += f"Columns: {columns_text}"
             table_texts.append(text)
         
         # Generate embeddings
