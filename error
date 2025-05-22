@@ -1,4 +1,1 @@
-Cell In[3], line 115
-    text += f"Columns: {', '.join([f\"{col['name']} ({col['type']})\" for col in table['columns']])}"
-                                                                                                     ^
-SyntaxError: f-string expression part cannot include a backslash
+Error: "Input to ChatPromptTemplate is missing variables {'table_context'}.  Expected: ['agent_scratchpad', 'input', 'table_context'] Received: ['dialect', 'table_info', 'top_k', 'input', 'intermediate_steps', 'agent_scratchpad']\nNote: if you intended {table_context} to be part of the string and not a variable, please escape it with double curly braces like: '{{table_context}}'.\nFor troubleshooting, visit: https://python.langchain.com/docs/troubleshooting/errors/INVALID_PROMPT_INPUT "
