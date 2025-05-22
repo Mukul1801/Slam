@@ -467,7 +467,19 @@ Answer: I do not know.
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             filename = f"text_to_sql_results_{timestamp}.xlsx"
         
-        df = pd.DataFrame(self.results)
+        # Clean results to ensure consistent columns
+        cleaned_results = []
+        for result in self.results:
+            cleaned_result = {
+                'user_query': result.get('user_query', ''),
+                'relevant_tables': result.get('relevant_tables', ''),
+                'sql_query': result.get('sql_query', ''),
+                'agent_answer': result.get('agent_answer', ''),
+                'runtime_seconds': result.get('runtime_seconds', 0)
+            }
+            cleaned_results.append(cleaned_result)
+        
+        df = pd.DataFrame(cleaned_results)
         df.columns = ['User Query', 'Relevant Tables', 'SQL Query Generated', 'Agent Answer', 'Runtime (seconds)']
         
         # Save to Excel
@@ -482,6 +494,27 @@ Answer: I do not know.
             worksheet.column_dimensions['C'].width = 80  # SQL Query
             worksheet.column_dimensions['D'].width = 60  # Agent Answer
             worksheet.column_dimensions['E'].width = 15  # Runtime
+            
+            # If we have debug data, create a separate sheet
+            if any('raw_output' in result for result in self.results):
+                debug_results = [result for result in self.results if 'raw_output' in result]
+                if debug_results:
+                    debug_df = pd.DataFrame(debug_results)
+                    debug_df.to_excel(writer, sheet_name='Debug_Data', index=False)
+                    
+                    # Adjust column widths for debug sheet
+                    debug_worksheet = writer.sheets['Debug_Data']
+                    for col in debug_worksheet.columns:
+                        max_length = 0
+                        column = col[0].column_letter
+                        for cell in col:
+                            try:
+                                if len(str(cell.value)) > max_length:
+                                    max_length = len(str(cell.value))
+                            except:
+                                pass
+                        adjusted_width = min(max_length + 2, 100)  # Cap at 100
+                        debug_worksheet.column_dimensions[column].width = adjusted_width
         
         print(f"Excel file saved with {len(df)} rows")
         return str(filepath)
@@ -523,11 +556,10 @@ def main():
     
     print(f"Processing {len(queries)} queries...")
     
-    # Process each query (set debug=True for first few queries to see what's happening)
+    # Process each query (debug all queries to see extraction issues)
     for i, query in enumerate(queries, 1):
         print(f"[{i}/{len(queries)}] {query}")
-        debug_mode = i <= 3  # Debug first 3 queries
-        result = bot.process_query(query, debug=debug_mode)
+        result = bot.process_query(query, debug=True)  # Debug ALL queries
         print(f"Runtime: {result['runtime_seconds']}s")
     
     # Export results
