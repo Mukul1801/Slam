@@ -183,13 +183,21 @@ class TextToSQLBot:
     
     def create_prompt(self, table_context):
         """Create SQL generation prompt."""
-        system_template = """You are an expert SQL query generator. Generate accurate SQL queries based on user questions.
+        system_template = """You are an expert SQL analyst. Generate accurate SQL queries and provide insightful interpretations.
 
 INSTRUCTIONS:
 1. Use ONLY the table schema provided below
 2. Create syntactically correct SQL queries
-3. Return response in JSON format: {{"SQLQuery": "query", "SQLResult": "result", "Answer": "explanation"}}
-4. Use appropriate column names: unit_name, plant_name, actual_energy, daily_target_volume, equipment_name
+3. After executing the query, provide a clear, business-focused interpretation
+4. Return response in JSON format: {{"SQLQuery": "query", "SQLResult": "result", "Answer": "interpretation"}}
+5. Use appropriate column names: unit_name, plant_name, actual_energy, daily_target_volume, equipment_name
+
+ANSWER GUIDELINES:
+- Provide clear, actionable insights from the data
+- Explain what the numbers mean in business context
+- Highlight key findings, trends, or comparisons
+- Be conversational and easy to understand
+- Focus on answering the user's question directly
 
 Available Tables:
 {table_info}"""
@@ -231,6 +239,7 @@ Available Tables:
             # Extract information
             output = response.get('output', '')
             sql_query = self.extract_sql_query(output)
+            agent_answer = self.extract_answer(output)
             
             runtime = time.time() - start_time
             
@@ -239,11 +248,12 @@ Available Tables:
                 'user_query': user_query,
                 'relevant_tables': ', '.join(relevant_tables),
                 'sql_query': sql_query,
-                'agent_answer': output,
+                'agent_answer': agent_answer,
                 'runtime_seconds': round(runtime, 2)
             }
             
             self.results.append(result)
+            print(f"Stored result #{len(self.results)}: {user_query[:50]}...")
             return result
             
         except Exception as e:
@@ -286,10 +296,36 @@ Available Tables:
         
         return "SQL query not found"
     
+    def extract_answer(self, text):
+        """Extract the Answer field from agent response."""
+        try:
+            # Try to parse JSON response first
+            if "Answer" in text:
+                start = text.find('{"')
+                if start != -1:
+                    brace_count = 0
+                    for i, char in enumerate(text[start:], start):
+                        if char == '{':
+                            brace_count += 1
+                        elif char == '}':
+                            brace_count -= 1
+                            if brace_count == 0:
+                                json_str = text[start:i+1]
+                                parsed = json.loads(json_str)
+                                return parsed.get("Answer", text)
+        except:
+            pass
+        
+        # If JSON parsing fails, return the full text
+        return text
+    
     def export_to_excel(self, filename=None):
         """Export results to Excel."""
         if not self.results:
+            print("No results to export")
             return "No results to export"
+        
+        print(f"Exporting {len(self.results)} results to Excel...")
         
         if filename is None:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -311,6 +347,7 @@ Available Tables:
             worksheet.column_dimensions['D'].width = 60  # Agent Answer
             worksheet.column_dimensions['E'].width = 15  # Runtime
         
+        print(f"Excel file saved with {len(df)} rows")
         return str(filepath)
 
 def main():
