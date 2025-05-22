@@ -3,6 +3,7 @@ import json
 import pickle
 import time
 import pandas as pd
+import re
 from pathlib import Path
 from typing import Dict, List
 from functools import lru_cache
@@ -24,6 +25,7 @@ import faiss
 SERVER_NAME = "your-databricks-server"
 HOST_HTTP_PATH = "your-http-path"
 DATABASE = "your_database"
+SCHEMA = "your_schema"  # Added missing SCHEMA variable
 WAREHOUSE_ID = "your_warehouse_id"
 DATABRICKS_TOKEN = "your_token"
 AZURE_ENDPOINT = "https://your-resource.openai.azure.com/"
@@ -67,68 +69,64 @@ class TextToSQLBot:
             azure_ad_token_provider=self.token_provider
         )
 
-        # Template
+        # Updated system template with consistent format
         self.system_template = """You are a helpful AI assistant expert in querying SQL Databases to find answers to the user's questions. \
-        Given an input question, first create a syntactically correct {dialect} SQL query to run, then look at the results of the query and provide a meaningful, human-readable answer to the input question. \
-        Do not return the raw SQL query result directly as the final answer. Instead, interpret the result and explain it in a concise and clear manner. \
-        You can order the results by a relevant column to return the most interesting examples in the database. \
-        Unless otherwise specified, do not return more than {top_k} rows.\
-        Do not try to pull table information from database and only use the table_info provided.\
-        Table information is provided as part of human message.\
- 
-        ===Response Guidelines
-        1. Follow these instructions for creating syntactically correct SQL queries: \
-            - Be sure not to query for columns that do not exist in the tables and use alias only where required.\
-            - Include unit_name, plant_name, actual_energy, daily_target_volume, and equipment_name in query if mentioned.\
-            - Always use the column 'unit_name' associated with the unit in the generated query.\
-            - Always use the column 'plant_name' in sql query generation whenever asked for plant or plant Names in user query. \
-            - Always use the column 'actual_energy' associated with the energy consumption in the generated query.\
-            - Always use the column 'daily_target_volume' associated with the production target, target volumne in the generated query.\
-            - Always use the column 'unit_name' associated with the unit name [('Ammonia-Y1',), ('Urea-Y4',), ('Urea-Y2',), ('Mine-8',), ('Urea-Y1',), ('LNG-7',), ('Urea-Y3',), ('LNG-5',), ('Ammonia-Y3',), ('Ammonia-Y2',), ('Ammonia-Y4',), ('LNG-6',)] .\
-            - Always use the column 'plant_name' associated with the plant name [('Y2',), ('Y3',), ('Y4',), ('Y1',)]. \
-            - Always use the column 'equipment_name' associated with the Asset in the generated query.\
-            - Whenever asked for plant or plant Names, return the institute names using column 'plant_name' associated with the 'plant_name' in the generated query.\
-            - Likewise, Use appropriate aggregation functions (AVG, SUM). Use'AVG' when average word, 'SUM' when total or overall word is used. Else DO NOT use aggregate functions.\
-            - Pay close attention to the filtering criteria mentioned in the question and incorporate them using the WHERE clause in your SQL query.\
-            - If the question involves multiple conditions, use logical operators such as AND, OR to combine them effectively.\
-            - When dealing with date or timestamp columns, use appropriate date functions (e.g., DATE_PART, EXTRACT) for extracting specific parts of the date or performing date arithmetic.\
-            - If the question involves grouping of data (e.g., finding totals or averages for different categories), use the GROUP BY clause along with appropriate aggregate functions.\
-            - Consider using aliases for tables and columns to improve readability of the query, especially in case of complex joins or subqueries.\
-            - If necessary, use subqueries or common table expressions (CTEs) to break down the problem into smaller, more manageable parts. \
-            - To determine the most energy-efficient or energy-inefficient plant, calculate the ratio by dividing the sum of actual production volume by the sum of actual energy used. Display the result and group along with plant namev only and unit if required. Do not apply the HAVING clause in the query.\
-            - Incorporate filtering criteria using the WHERE clause.\
-            - Use date functions for date or timestamp columns.\
- 
-        2. After executing the SQL query, interpret the results and provide a meaningful, human-readable answer to the user's question. \
-            - For example, if the query returns a numeric value, explain what it represents. \
-            - If the query returns multiple rows, summarize the key insights instead of listing all rows. \
-            - If the query involves trends or comparisons, describe them clearly.
- 
-        3. If the provided context is insufficient, explain why the query cannot be generated or why the question cannot be answered.
- 
-        4. Always format the SQL query for readability before responding.
- 
-        5. Always respond with a valid, well-formed JSON object in the following format:
-        {{
-            "SQLQuery": "Generated SQL query here",
-            "SQLResult": "Raw SQL query result here",
-            "Answer": "Human-readable interpretation of the result here"
-        }}
-       
-        6. If the user query is about creating graphs or plots, generate a valid SQL query to produce the data required for plotting and explain how the data can be visualized.
- 
-        7. If you do not know the answer, reply as follows: {{"answer": "I do not know."}}
+Given an input question, first create a syntactically correct {dialect} SQL query to run, then look at the results of the query and provide a meaningful, human-readable answer to the input question. \
+Do not return the raw SQL query result directly as the final answer. Instead, interpret the result and explain it in a concise and clear manner. \
+You can order the results by a relevant column to return the most interesting examples in the database. \
+Unless otherwise specified, do not return more than {top_k} rows.\
+Do not try to pull table information from database and only use the table_info provided.\
+Table information is provided as part of human message.
 
-        8. Remove sql keyword from query generated. 
- 
-        ===Response Format
-        You are required to use the following format, each taking one line:
- 
-        Question: Question here
-        SQLQuery: SQL Query to run
-        SQLResult: Result of the SQLQuery
-        Answer: A detailed, human-readable final answer here
-        """
+===Response Guidelines
+1. Follow these instructions for creating syntactically correct SQL queries: \
+    - Be sure not to query for columns that do not exist in the tables and use alias only where required.\
+    - Include unit_name, plant_name, actual_energy, daily_target_volume, and equipment_name in query if mentioned.\
+    - Always use the column 'unit_name' associated with the unit in the generated query.\
+    - Always use the column 'plant_name' in sql query generation whenever asked for plant or plant Names in user query. \
+    - Always use the column 'actual_energy' associated with the energy consumption in the generated query.\
+    - Always use the column 'daily_target_volume' associated with the production target, target volumne in the generated query.\
+    - Always use the column 'unit_name' associated with the unit name [('Ammonia-Y1',), ('Urea-Y4',), ('Urea-Y2',), ('Mine-8',), ('Urea-Y1',), ('LNG-7',), ('Urea-Y3',), ('LNG-5',), ('Ammonia-Y3',), ('Ammonia-Y2',), ('Ammonia-Y4',), ('LNG-6',)] .\
+    - Always use the column 'plant_name' associated with the plant name [('Y2',), ('Y3',), ('Y4',), ('Y1',)]. \
+    - Always use the column 'equipment_name' associated with the Asset in the generated query.\
+    - Whenever asked for plant or plant Names, return the institute names using column 'plant_name' associated with the 'plant_name' in the generated query.\
+    - Likewise, Use appropriate aggregation functions (AVG, SUM). Use'AVG' when average word, 'SUM' when total or overall word is used. Else DO NOT use aggregate functions.\
+    - Pay close attention to the filtering criteria mentioned in the question and incorporate them using the WHERE clause in your SQL query.\
+    - If the question involves multiple conditions, use logical operators such as AND, OR to combine them effectively.\
+    - When dealing with date or timestamp columns, use appropriate date functions (e.g., DATE_PART, EXTRACT) for extracting specific parts of the date or performing date arithmetic.\
+    - If the question involves grouping of data (e.g., finding totals or averages for different categories), use the GROUP BY clause along with appropriate aggregate functions.\
+    - Consider using aliases for tables and columns to improve readability of the query, especially in case of complex joins or subqueries.\
+    - If necessary, use subqueries or common table expressions (CTEs) to break down the problem into smaller, more manageable parts. \
+    - To determine the most energy-efficient or energy-inefficient plant, calculate the ratio by dividing the sum of actual production volume by the sum of actual energy used. Display the result and group along with plant namev only and unit if required. Do not apply the HAVING clause in the query.\
+    - Incorporate filtering criteria using the WHERE clause.\
+    - Use date functions for date or timestamp columns.\
+
+2. After executing the SQL query, interpret the results and provide a meaningful, human-readable answer to the user's question. \
+    - For example, if the query returns a numeric value, explain what it represents. \
+    - If the query returns multiple rows, summarize the key insights instead of listing all rows. \
+    - If the query involves trends or comparisons, describe them clearly.
+
+3. If the provided context is insufficient, explain why the query cannot be generated or why the question cannot be answered.
+
+4. Always format the SQL query for readability before responding.
+
+5. IMPORTANT: Always respond using EXACTLY this format (each on a separate line):
+
+Question: [Repeat the user's question here]
+SQLQuery: [Your generated SQL query here - do not include the word 'sql' at the start]
+SQLResult: [The raw result from executing the SQL query]
+Answer: [Your human-readable interpretation and explanation of the results]
+
+6. If the user query is about creating graphs or plots, generate a valid SQL query to produce the data required for plotting and explain how the data can be visualized.
+
+7. If you do not know the answer, respond with:
+Question: [User's question]
+SQLQuery: Unable to generate query
+SQLResult: No results available
+Answer: I do not know.
+
+8. Remove sql keyword from query generated.
+"""
         
         self.table_metadata = []
         self.faiss_index = None
@@ -246,7 +244,6 @@ class TextToSQLBot:
     
     def create_prompt(self, template, table_context):
         """Create SQL generation prompt."""
-
         return ChatPromptTemplate.from_messages([
             ("system", template),
             ("human", "Use this table info only: {table_context}"),
@@ -254,7 +251,132 @@ class TextToSQLBot:
             MessagesPlaceholder(variable_name="agent_scratchpad"),
         ])
     
-    def process_query(self, user_query: str):
+    def extract_sql_query(self, text):
+        """Extract SQL query from agent response with multiple fallback strategies."""
+        
+        # Strategy 1: Try to parse JSON response
+        try:
+            # Look for JSON-like structure more flexibly
+            json_patterns = [
+                r'\{[^{}]*"SQLQuery"[^{}]*\}',  # Simple JSON
+                r'\{(?:[^{}]|{[^{}]*})*"SQLQuery"(?:[^{}]|{[^{}]*})*\}',  # Nested JSON
+            ]
+            
+            for pattern in json_patterns:
+                matches = re.findall(pattern, text, re.DOTALL | re.IGNORECASE)
+                for match in matches:
+                    try:
+                        parsed = json.loads(match)
+                        if "SQLQuery" in parsed and parsed["SQLQuery"].strip():
+                            return parsed["SQLQuery"].strip()
+                    except:
+                        continue
+        except Exception as e:
+            print(f"JSON parsing error: {e}")
+        
+        # Strategy 2: Look for SQLQuery: pattern (your template format)
+        try:
+            sql_pattern = r'SQLQuery:\s*(.*?)(?=\n(?:SQLResult:|Answer:|Question:)|$)'
+            match = re.search(sql_pattern, text, re.IGNORECASE | re.DOTALL)
+            if match:
+                sql_query = match.group(1).strip()
+                if sql_query and not sql_query.lower().startswith('result'):
+                    return sql_query
+        except Exception as e:
+            print(f"SQLQuery pattern error: {e}")
+        
+        # Strategy 3: Look for SQL keywords with context
+        try:
+            # Find SELECT statements with better context matching
+            sql_keywords = ['SELECT', 'WITH', 'INSERT', 'UPDATE', 'DELETE']
+            lines = text.split('\n')
+            
+            for i, line in enumerate(lines):
+                line_stripped = line.strip()
+                if any(line_stripped.upper().startswith(keyword) for keyword in sql_keywords):
+                    # Collect multi-line SQL query
+                    sql_lines = [line_stripped]
+                    
+                    # Look ahead for continuation
+                    for j in range(i + 1, min(i + 10, len(lines))):  # Look ahead max 10 lines
+                        next_line = lines[j].strip()
+                        if not next_line:
+                            break
+                        if any(next_line.upper().startswith(kw) for kw in ['QUESTION:', 'SQLRESULT:', 'ANSWER:']):
+                            break
+                        sql_lines.append(next_line)
+                    
+                    full_query = ' '.join(sql_lines)
+                    if len(full_query) > 10:  # Reasonable length check
+                        return full_query
+        except Exception as e:
+            print(f"SQL keyword search error: {e}")
+        
+        # Strategy 4: Look for code blocks
+        try:
+            # Look for SQL in code blocks (```sql or ```)
+            code_patterns = [
+                r'```sql\s*(.*?)\s*```',
+                r'```\s*(SELECT.*?)\s*```',
+                r'`(SELECT.*?)`'
+            ]
+            
+            for pattern in code_patterns:
+                matches = re.findall(pattern, text, re.DOTALL | re.IGNORECASE)
+                for match in matches:
+                    if match.strip():
+                        return match.strip()
+        except Exception as e:
+            print(f"Code block search error: {e}")
+        
+        # Strategy 5: Last resort - find any SELECT statement
+        try:
+            select_pattern = r'\b(SELECT\b.*?)(?=\n\n|\nQuestion:|\nSQLResult:|\nAnswer:|$)'
+            match = re.search(select_pattern, text, re.IGNORECASE | re.DOTALL)
+            if match:
+                return match.group(1).strip()
+        except Exception as e:
+            print(f"Last resort SELECT search error: {e}")
+        
+        return "SQL query not found"
+    
+    def extract_answer(self, text):
+        """Extract the Answer field from agent response with improved parsing."""
+        
+        # Strategy 1: Try JSON parsing first
+        try:
+            json_patterns = [
+                r'\{[^{}]*"Answer"[^{}]*\}',
+                r'\{(?:[^{}]|{[^{}]*})*"Answer"(?:[^{}]|{[^{}]*})*\}',
+            ]
+            
+            for pattern in json_patterns:
+                matches = re.findall(pattern, text, re.DOTALL | re.IGNORECASE)
+                for match in matches:
+                    try:
+                        parsed = json.loads(match)
+                        if "Answer" in parsed and parsed["Answer"].strip():
+                            return parsed["Answer"].strip()
+                    except:
+                        continue
+        except:
+            pass
+        
+        # Strategy 2: Look for Answer: pattern
+        try:
+            answer_pattern = r'Answer:\s*(.*?)(?=\n\n|$)'
+            match = re.search(answer_pattern, text, re.IGNORECASE | re.DOTALL)
+            if match:
+                answer = match.group(1).strip()
+                if answer:
+                    return answer
+        except:
+            pass
+        
+        # Strategy 3: Return full text if no structured format found
+        return text
+    
+    def process_query(self, user_query: str, debug=False):
         """Process a single query and return results."""
         start_time = time.time()
         
@@ -270,22 +392,29 @@ class TextToSQLBot:
                 llm=self.llm,
                 toolkit=toolkit,
                 prompt=string_prompt,
-                agent_type= "openai-tools",
+                agent_type="openai-tools",
                 handle_parsing_errors=True,
                 verbose=False
-                )
+            )
             
             # Execute query
             response = dbr_agent.invoke({
-                "dialect":self.db.dialect,
+                "dialect": self.db.dialect,
                 "table_info": table_context,
-                "top_k":3,
-                "agent_scratchpad":[],
+                "top_k": 3,
+                "agent_scratchpad": [],
                 "input": user_query
             })
             
             # Extract information
             output = response.get('output', '')
+            
+            # Debug: Print raw output for first few queries or when debug=True
+            if debug or len(self.results) < 3:
+                print(f"\n=== DEBUG: Raw agent output for query '{user_query[:50]}...' ===")
+                print(output)
+                print("=" * 60)
+            
             sql_query = self.extract_sql_query(output)
             agent_answer = self.extract_answer(output)
             
@@ -300,8 +429,18 @@ class TextToSQLBot:
                 'runtime_seconds': round(runtime, 2)
             }
             
+            # Add raw output for debugging if needed
+            if debug:
+                result['raw_output'] = output[:500] + "..." if len(output) > 500 else output
+            
             self.results.append(result)
             print(f"Stored result #{len(self.results)}: {user_query[:50]}...")
+            
+            # Debug: Show extraction results for first few queries
+            if debug or len(self.results) <= 3:
+                print(f"Extracted SQL: {sql_query}")
+                print(f"Extracted Answer: {agent_answer[:100]}...")
+            
             return result
             
         except Exception as e:
@@ -315,57 +454,6 @@ class TextToSQLBot:
             }
             self.results.append(result)
             return result
-    
-    def extract_sql_query(self, text):
-        """Extract SQL query from agent response."""
-        try:
-            # Try to parse JSON response
-            if "SQLQuery" in text:
-                start = text.find('{"')
-                if start != -1:
-                    brace_count = 0
-                    for i, char in enumerate(text[start:], start):
-                        if char == '{':
-                            brace_count += 1
-                        elif char == '}':
-                            brace_count -= 1
-                            if brace_count == 0:
-                                json_str = text[start:i+1]
-                                parsed = json.loads(json_str)
-                                return parsed.get("SQLQuery", "")
-        except:
-            pass
-        
-        # Fallback: find SELECT statement
-        lines = text.split('\n')
-        for line in lines:
-            if line.strip().upper().startswith('SELECT'):
-                return line.strip()
-        
-        return "SQL query not found"
-    
-    def extract_answer(self, text):
-        """Extract the Answer field from agent response."""
-        try:
-            # Try to parse JSON response first
-            if "Answer" in text:
-                start = text.find('{"')
-                if start != -1:
-                    brace_count = 0
-                    for i, char in enumerate(text[start:], start):
-                        if char == '{':
-                            brace_count += 1
-                        elif char == '}':
-                            brace_count -= 1
-                            if brace_count == 0:
-                                json_str = text[start:i+1]
-                                parsed = json.loads(json_str)
-                                return parsed.get("Answer", text)
-        except:
-            pass
-        
-        # If JSON parsing fails, return the full text
-        return text
     
     def export_to_excel(self, filename=None):
         """Export results to Excel."""
@@ -402,29 +490,29 @@ def main():
     """Run the text-to-SQL system."""
     # Test queries
     queries = [
-    "which plant has the highest actual production in December 2024?",
-    "which plant has the lowest actual production in December 2024?",
-    "which 3 plants used the most energy in 2024?",
-    "What iwas the most energy efficient plant in 2024?",
-    "which asset caused the most lost volume in 2024? ",
-    "What is the lost volume for gas meter in 2024? ",
-    "What unit name had the lowest production in 2024?",
-    "What unit name had the largest production in 2024?",
-    "Which plant had the least production in 2024?",
-    "What are the units belonging to Y1 plant?",
-    "Which plant type had the largest production in 2024?",
-    "Provide the name and energy consumption for the top 3 plants with highest energy consumption in January 2024.",
-    "Provide the plant name and total energy consumption for the 3 unit ids with highest energy consumption in January 2024.    ",
-    "For All plants, give a breakdown of total energy consumed for each unit.",
-    "For Plants Y1 and Y4, give a breakdown of total energy consumed for each unit.",
-    "For All plants, give a breakdown of daily average of energy consumed for each unit.",
-    "Which plants have units with average energy consumption less than 500. Provide unit name and daily average consumption.",
-    "For LNG-5, which days in January 2024, did we have energy consumption more than 250.",
-    "Which days did LNG-5 not meet target volume?    ",
-    "Which days did LNG-5 use more energy than its average energy consumption",
-    "Which days did LNG-5 use more energy than its average energy consumption and also not meet its production target?      ",
-    "which plants are inefficient?     ",
-    "Which day was the worst in terms of energy usage and production?"
+        "which plant has the highest actual production in December 2024?",
+        "which plant has the lowest actual production in December 2024?",
+        "which 3 plants used the most energy in 2024?",
+        "What was the most energy efficient plant in 2024?",
+        "which asset caused the most lost volume in 2024? ",
+        "What is the lost volume for gas meter in 2024? ",
+        "What unit name had the lowest production in 2024?",
+        "What unit name had the largest production in 2024?",
+        "Which plant had the least production in 2024?",
+        "What are the units belonging to Y1 plant?",
+        "Which plant type had the largest production in 2024?",
+        "Provide the name and energy consumption for the top 3 plants with highest energy consumption in January 2024.",
+        "Provide the plant name and total energy consumption for the 3 unit ids with highest energy consumption in January 2024.",
+        "For All plants, give a breakdown of total energy consumed for each unit.",
+        "For Plants Y1 and Y4, give a breakdown of total energy consumed for each unit.",
+        "For All plants, give a breakdown of daily average of energy consumed for each unit.",
+        "Which plants have units with average energy consumption less than 500. Provide unit name and daily average consumption.",
+        "For LNG-5, which days in January 2024, did we have energy consumption more than 250.",
+        "Which days did LNG-5 not meet target volume?",
+        "Which days did LNG-5 use more energy than its average energy consumption",
+        "Which days did LNG-5 use more energy than its average energy consumption and also not meet its production target?",
+        "which plants are inefficient?",
+        "Which day was the worst in terms of energy usage and production?"
     ]
     
     # Initialize bot
@@ -435,10 +523,11 @@ def main():
     
     print(f"Processing {len(queries)} queries...")
     
-    # Process each query
+    # Process each query (set debug=True for first few queries to see what's happening)
     for i, query in enumerate(queries, 1):
         print(f"[{i}/{len(queries)}] {query}")
-        result = bot.process_query(query)
+        debug_mode = i <= 3  # Debug first 3 queries
+        result = bot.process_query(query, debug=debug_mode)
         print(f"Runtime: {result['runtime_seconds']}s")
     
     # Export results
