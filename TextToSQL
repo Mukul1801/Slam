@@ -44,7 +44,7 @@ class TextToSQLBot:
         HOST = f"{SERVER_NAME}/{HOST_HTTP_PATH}"
         self.db = SQLDatabase.from_databricks(
             catalog=DATABASE, 
-            schema="abc", 
+            schema=SCHEMA, 
             engine_args={"pool_pre_ping": True},
             host=HOST,
             api_token=DATABRICKS_TOKEN,
@@ -66,6 +66,69 @@ class TextToSQLBot:
             azure_endpoint=AZURE_ENDPOINT,
             azure_ad_token_provider=self.token_provider
         )
+
+        # Template
+        self.system_template = """You are a helpful AI assistant expert in querying SQL Databases to find answers to the user's questions. \
+        Given an input question, first create a syntactically correct {dialect} SQL query to run, then look at the results of the query and provide a meaningful, human-readable answer to the input question. \
+        Do not return the raw SQL query result directly as the final answer. Instead, interpret the result and explain it in a concise and clear manner. \
+        You can order the results by a relevant column to return the most interesting examples in the database. \
+        Unless otherwise specified, do not return more than {top_k} rows.\
+        Do not try to pull table information from database and only use the table_info provided.\
+        Table information is provided as part of human message.\
+ 
+        ===Response Guidelines
+        1. Follow these instructions for creating syntactically correct SQL queries: \
+            - Be sure not to query for columns that do not exist in the tables and use alias only where required.\
+            - Include unit_name, plant_name, actual_energy, daily_target_volume, and equipment_name in query if mentioned.\
+            - Always use the column 'unit_name' associated with the unit in the generated query.\
+            - Always use the column 'plant_name' in sql query generation whenever asked for plant or plant Names in user query. \
+            - Always use the column 'actual_energy' associated with the energy consumption in the generated query.\
+            - Always use the column 'daily_target_volume' associated with the production target, target volumne in the generated query.\
+            - Always use the column 'unit_name' associated with the unit name [('Ammonia-Y1',), ('Urea-Y4',), ('Urea-Y2',), ('Mine-8',), ('Urea-Y1',), ('LNG-7',), ('Urea-Y3',), ('LNG-5',), ('Ammonia-Y3',), ('Ammonia-Y2',), ('Ammonia-Y4',), ('LNG-6',)] .\
+            - Always use the column 'plant_name' associated with the plant name [('Y2',), ('Y3',), ('Y4',), ('Y1',)]. \
+            - Always use the column 'equipment_name' associated with the Asset in the generated query.\
+            - Whenever asked for plant or plant Names, return the institute names using column 'plant_name' associated with the 'plant_name' in the generated query.\
+            - Likewise, Use appropriate aggregation functions (AVG, SUM). Use'AVG' when average word, 'SUM' when total or overall word is used. Else DO NOT use aggregate functions.\
+            - Pay close attention to the filtering criteria mentioned in the question and incorporate them using the WHERE clause in your SQL query.\
+            - If the question involves multiple conditions, use logical operators such as AND, OR to combine them effectively.\
+            - When dealing with date or timestamp columns, use appropriate date functions (e.g., DATE_PART, EXTRACT) for extracting specific parts of the date or performing date arithmetic.\
+            - If the question involves grouping of data (e.g., finding totals or averages for different categories), use the GROUP BY clause along with appropriate aggregate functions.\
+            - Consider using aliases for tables and columns to improve readability of the query, especially in case of complex joins or subqueries.\
+            - If necessary, use subqueries or common table expressions (CTEs) to break down the problem into smaller, more manageable parts. \
+            - To determine the most energy-efficient or energy-inefficient plant, calculate the ratio by dividing the sum of actual production volume by the sum of actual energy used. Display the result and group along with plant namev only and unit if required. Do not apply the HAVING clause in the query.\
+            - Incorporate filtering criteria using the WHERE clause.\
+            - Use date functions for date or timestamp columns.\
+ 
+        2. After executing the SQL query, interpret the results and provide a meaningful, human-readable answer to the user's question. \
+            - For example, if the query returns a numeric value, explain what it represents. \
+            - If the query returns multiple rows, summarize the key insights instead of listing all rows. \
+            - If the query involves trends or comparisons, describe them clearly.
+ 
+        3. If the provided context is insufficient, explain why the query cannot be generated or why the question cannot be answered.
+ 
+        4. Always format the SQL query for readability before responding.
+ 
+        5. Always respond with a valid, well-formed JSON object in the following format:
+        {{
+            "SQLQuery": "Generated SQL query here",
+            "SQLResult": "Raw SQL query result here",
+            "Answer": "Human-readable interpretation of the result here"
+        }}
+       
+        6. If the user query is about creating graphs or plots, generate a valid SQL query to produce the data required for plotting and explain how the data can be visualized.
+ 
+        7. If you do not know the answer, reply as follows: {{"answer": "I do not know."}}
+
+        8. Remove sql keyword from query generated. 
+ 
+        ===Response Format
+        You are required to use the following format, each taking one line:
+ 
+        Question: Question here
+        SQLQuery: SQL Query to run
+        SQLResult: Result of the SQLQuery
+        Answer: A detailed, human-readable final answer here
+        """
         
         self.table_metadata = []
         self.faiss_index = None
@@ -181,29 +244,12 @@ class TextToSQLBot:
         
         return context, table_names
     
-    def create_prompt(self, table_context):
+    def create_prompt(self, template, table_context):
         """Create SQL generation prompt."""
-        system_template = """You are an expert SQL analyst. Generate accurate SQL queries and provide insightful interpretations.
-
-INSTRUCTIONS:
-1. Use ONLY the table schema provided below
-2. Create syntactically correct SQL queries
-3. After executing the query, provide a clear, business-focused interpretation
-4. Return response in JSON format: {{"SQLQuery": "query", "SQLResult": "result", "Answer": "interpretation"}}
-5. Use appropriate column names: unit_name, plant_name, actual_energy, daily_target_volume, equipment_name
-
-ANSWER GUIDELINES:
-- Provide clear, actionable insights from the data
-- Explain what the numbers mean in business context
-- Highlight key findings, trends, or comparisons
-- Be conversational and easy to understand
-- Focus on answering the user's question directly
-
-Available Tables:
-{table_info}"""
 
         return ChatPromptTemplate.from_messages([
-            ("system", system_template),
+            ("system", template),
+            ("human", "Use this table info only: {table_context}"),
             ("human", "{input}"),
             MessagesPlaceholder(variable_name="agent_scratchpad"),
         ])
@@ -217,23 +263,25 @@ Available Tables:
             table_context, relevant_tables = self.find_relevant_tables(user_query)
             
             # Create agent
-            prompt = self.create_prompt(table_context)
+            string_prompt = self.create_prompt(self.system_template, table_context)
             toolkit = SQLDatabaseToolkit(db=self.db, llm=self.llm)
-            
-            agent = create_sql_agent(
+    
+            dbr_agent = create_sql_agent(
                 llm=self.llm,
                 toolkit=toolkit,
-                prompt=prompt,
-                agent_type="openai-tools",
+                prompt=string_prompt,
+                agent_type= "openai-tools",
                 handle_parsing_errors=True,
                 verbose=False
-            )
+                )
             
             # Execute query
-            response = agent.invoke({
+            response = dbr_agent.invoke({
+                "dialect":self.db.dialect,
                 "table_info": table_context,
-                "input": user_query,
-                "agent_scratchpad": []
+                "top_k":3,
+                "agent_scratchpad":[],
+                "input": user_query
             })
             
             # Extract information
@@ -354,11 +402,29 @@ def main():
     """Run the text-to-SQL system."""
     # Test queries
     queries = [
-        "What is the average energy consumption by plant?",
-        "Which unit has the highest production target?",
-        "Show me the energy efficiency ratio for each plant",
-        "What equipment is used in the Y1 plant?",
-        "Compare energy consumption between plants"
+    "which plant has the highest actual production in December 2024?",
+    "which plant has the lowest actual production in December 2024?",
+    "which 3 plants used the most energy in 2024?",
+    "What iwas the most energy efficient plant in 2024?",
+    "which asset caused the most lost volume in 2024? ",
+    "What is the lost volume for gas meter in 2024? ",
+    "What unit name had the lowest production in 2024?",
+    "What unit name had the largest production in 2024?",
+    "Which plant had the least production in 2024?",
+    "What are the units belonging to Y1 plant?",
+    "Which plant type had the largest production in 2024?",
+    "Provide the name and energy consumption for the top 3 plants with highest energy consumption in January 2024.",
+    "Provide the plant name and total energy consumption for the 3 unit ids with highest energy consumption in January 2024.    ",
+    "For All plants, give a breakdown of total energy consumed for each unit.",
+    "For Plants Y1 and Y4, give a breakdown of total energy consumed for each unit.",
+    "For All plants, give a breakdown of daily average of energy consumed for each unit.",
+    "Which plants have units with average energy consumption less than 500. Provide unit name and daily average consumption.",
+    "For LNG-5, which days in January 2024, did we have energy consumption more than 250.",
+    "Which days did LNG-5 not meet target volume?    ",
+    "Which days did LNG-5 use more energy than its average energy consumption",
+    "Which days did LNG-5 use more energy than its average energy consumption and also not meet its production target?      ",
+    "which plants are inefficient?     ",
+    "Which day was the worst in terms of energy usage and production?"
     ]
     
     # Initialize bot
