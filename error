@@ -1,0 +1,4 @@
+Cell In[3], line 115
+    text += f"Columns: {', '.join([f\"{col['name']} ({col['type']})\" for col in table['columns']])}"
+                                                                                                     ^
+SyntaxError: f-string expression part cannot include a backslash
