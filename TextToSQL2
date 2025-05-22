@@ -112,13 +112,16 @@ def query_faiss(query_text, k=3):
     
     relevant_table_metadata = [clean_metadata_list[i] for i in indices[0]]
     
+    # Extract table names for output
+    relevant_table_names = [table['table_name'] for table in relevant_table_metadata]
+    
     formatted_metadata = "\n\n".join(
         f"**Table:** {table['table_name']}\n**Description:** {table['description']}\n**Columns:**\n" +
         "\n".join([f"- {col['name']} ({col['type']}): {col['description']}" for col in table["columns"]])
         for table in relevant_table_metadata
     )
     
-    return formatted_metadata
+    return formatted_metadata, relevant_table_names
 
 # Define prompt template
 SYSTEM_TEMPLATE = """
@@ -197,7 +200,7 @@ toolkit = SQLDatabaseToolkit(db=db, llm=llm_instance)
 
 def agent_trigger(question):
     """Trigger the agent with a question and return the response."""
-    context = query_faiss(question)
+    context, relevant_tables = query_faiss(question)
     string_prompt = create_prompt(context)
 
     dbr_agent = create_sql_agent(
@@ -216,6 +219,9 @@ def agent_trigger(question):
         "agent_scratchpad": [],
         "input": question
     })
+    
+    # Add relevant tables to the response
+    human_response["relevant_tables"] = relevant_tables
     return human_response
 
 def parse_response(response_output):
@@ -243,6 +249,7 @@ def test_agent(query):
     
     response_time = round(end_time - start_time, 2)
     response_output = response["output"].strip()
+    relevant_tables = response.get("relevant_tables", [])
     
     question, sql_query, answer = parse_response(response_output)
     
@@ -250,7 +257,8 @@ def test_agent(query):
         'Question': query,
         'SQL_Query': sql_query,
         'Answer': answer,
-        'Response_Time': response_time
+        'Response_Time': response_time,
+        'Relevant_Tables': ', '.join(relevant_tables)  # Join table names with comma
     }
 
 # Test questions
@@ -296,7 +304,8 @@ def run_tests_and_save_excel():
                 'Question': question,
                 'SQL_Query': f"Error: {str(e)}",
                 'Answer': f"Error: {str(e)}",
-                'Response_Time': 0
+                'Response_Time': 0,
+                'Relevant_Tables': "Error retrieving tables"
             })
     
     # Create DataFrame and save to Excel
