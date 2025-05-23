@@ -20,8 +20,62 @@ IGNORED_COLUMNS = {
     "Provider", "Owner", "Is_managed_location", "Predictive Optimization", "Table Properties"
 }
 
+# Define categorical data types and keywords
+CATEGORICAL_TYPES = {
+    'string', 'varchar', 'char', 'text', 'enum'
+}
+
+CATEGORICAL_KEYWORDS = {
+    'name', 'type', 'status', 'category', 'code', 'id', 'level', 'grade', 
+    'class', 'group', 'department', 'unit', 'plant', 'equipment', 'asset'
+}
+
+def is_categorical_column(column_name, column_type):
+    """Determine if a column is likely categorical."""
+    # Check if column type indicates categorical data
+    if any(cat_type in column_type.lower() for cat_type in CATEGORICAL_TYPES):
+        return True
+    
+    # Check if column name suggests categorical data
+    if any(keyword in column_name.lower() for keyword in CATEGORICAL_KEYWORDS):
+        return True
+    
+    return False
+
+def get_column_unique_values(table_name, column_name, limit=15):
+    """Get unique values for a specific column."""
+    try:
+        query = f"""
+        SELECT DISTINCT {column_name} 
+        FROM {table_name} 
+        WHERE {column_name} IS NOT NULL 
+        LIMIT {limit}
+        """
+        
+        result = db.run(query)
+        
+        # Parse the result based on format
+        if isinstance(result, str):
+            # Handle string result
+            lines = result.strip().split('\n')
+            unique_values = []
+            for line in lines[1:]:  # Skip header
+                if line.strip():
+                    value = line.strip()
+                    if value and value != column_name:  # Skip header row
+                        unique_values.append(value)
+        else:
+            # Handle list result
+            unique_values = [str(row[0]) for row in result if row[0] is not None]
+        
+        return unique_values[:limit]
+    
+    except Exception as e:
+        print(f"Error getting unique values for {table_name}.{column_name}: {str(e)}")
+        return []
+
 def extract_table_metadata(table_name):
-    """Retrieves table metadata and formats it properly."""
+    """Retrieves table metadata with unique values for categorical columns."""
     try:
         describe_output = db.run(f"DESCRIBE EXTENDED {table_name}")
         processed_output = eval(describe_output) if isinstance(describe_output, str) else describe_output
@@ -35,11 +89,24 @@ def extract_table_metadata(table_name):
         if row[0].strip().lower() == "comment":
             table_description = row[1]  # Extract table description
         elif len(row) == 3 and row[0].strip() and row[0].strip() not in IGNORED_COLUMNS:
-            column_details.append({
-                "name": row[0], 
-                "type": row[1], 
-                "description": row[2] or "No description available"
-            })
+            column_name = row[0].strip()
+            column_type = row[1].strip()
+            column_desc = row[2] or "No description available"
+            
+            column_info = {
+                "name": column_name, 
+                "type": column_type, 
+                "description": column_desc
+            }
+            
+            # Check if this is a categorical column and get unique values
+            if is_categorical_column(column_name, column_type):
+                print(f"Getting unique values for: {table_name}.{column_name}")
+                unique_values = get_column_unique_values(table_name, column_name)
+                if unique_values:
+                    column_info["unique_values"] = unique_values
+            
+            column_details.append(column_info)
 
     return {
         "table_name": table_name,
@@ -47,17 +114,12 @@ def extract_table_metadata(table_name):
         "columns": column_details
     }
 
-tables = db.get_usable_table_names()
-table_metadata = [extract_table_metadata(table) for table in tables]
-
 def clean_metadata(table_metadata):
     for table in table_metadata:
         table["columns"] = [
             col for col in table["columns"] if col["name"].strip() and col["name"] != "# Detailed Table Information"
         ]
     return table_metadata
-
-clean_metadata_list = clean_metadata(table_metadata)
 
 # Define the required scope
 scope = "https://cognitiveservices.azure.com/.default"
@@ -111,17 +173,31 @@ def get_embeddings(text):
         input=text
     )
     return response.data[0].embedding
+
 # Initialize table metadata and FAISS index
 print("Loading table metadata...")
 tables = db.get_usable_table_names()
 table_metadata = [extract_table_metadata(table) for table in tables]
 clean_metadata_list = clean_metadata(table_metadata)
 
-# Convert each table's metadata into a structured text format
-table_texts = [
-    f"Table: {table['table_name']}\nDescription: {table['description']}\nColumns: {table['columns']}"
-    for table in clean_metadata_list
-]
+# Convert each table's metadata into a structured text format with unique values
+def format_table_text_with_values(table):
+    """Format table metadata including unique values for categorical columns."""
+    text = f"Table: {table['table_name']}\nDescription: {table['description']}\nColumns:\n"
+    
+    for col in table['columns']:
+        col_text = f"- {col['name']} ({col['type']}): {col['description']}"
+        
+        # Add unique values if available
+        if 'unique_values' in col and col['unique_values']:
+            values_str = ", ".join([f"'{val}'" for val in col['unique_values']])
+            col_text += f"\n  Available values: {values_str}"
+        
+        text += col_text + "\n"
+    
+    return text
+
+table_texts = [format_table_text_with_values(table) for table in clean_metadata_list]
 
 print("Creating embeddings and FAISS index...")
 embeddings = np.array([get_embeddings(text) for text in table_texts])
@@ -140,12 +216,17 @@ def query_faiss(query_text, k=3):
     # Extract table names for output
     relevant_table_names = [table['table_name'] for table in relevant_table_metadata]
     
-    # Format extracted metadata for readability
-    formatted_metadata = "\n\n".join(
+    # Format extracted metadata for readability with unique values
+    formatted_metadata = "\n\n".join([
         f"**Table:** {table['table_name']}\n**Description:** {table['description']}\n**Columns:**\n" +
-        "\n".join([f"- {col['name']} ({col['type']}): {col['description']}" for col in table["columns"]])
+        "\n".join([
+            f"- {col['name']} ({col['type']}): {col['description']}" + 
+            (f"\n  Available values: {', '.join([f\"'{val}'\" for val in col['unique_values']])}" 
+             if 'unique_values' in col and col['unique_values'] else "")
+            for col in table["columns"]
+        ])
         for table in relevant_table_metadata
-    )
+    ])
 
     return formatted_metadata, relevant_table_names
 
@@ -158,8 +239,11 @@ You can order the results by a relevant column to return the most interesting ex
 Unless otherwise specified, do not return more than {top_k} rows.\
 Do not try to pull table information from database and only use the table_info provided.
 
+IMPORTANT: The table information includes "Available values" for categorical columns. Use these exact values when filtering or searching for specific categorical data.
+
 ===Response Guidelines
 1. Follow these instructions for creating syntactically correct SQL queries: \
+    - When you see "Available values" for a column, use only those exact values for filtering
     - Be sure not to query for columns that do not exist in the tables and use alias only where required.\
     - Include unit_name, plant_name, actual_energy, daily_target_volume, and equipment_name in query if mentioned.\
     - Always use the column 'unit_name' associated with the unit in the generated query.\
@@ -210,6 +294,8 @@ lower(equipment_name) = 'gas meter'
 10. Always check for the available examples in the table_info to verify \
 if the variable being used in sql statement even has that type of value.
 
+11. When filtering on categorical columns, first check the "Available values" section to ensure you're using exact matching values.
+
 ===Response Format
 You are required to use the following format, each taking one line:
 
@@ -256,4 +342,3 @@ def agent_trigger(question):
     # Add relevant tables to the response
     human_response["relevant_tables"] = relevant_tables
     return human_response
-
