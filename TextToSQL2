@@ -6,15 +6,13 @@ from azure.identity import DefaultAzureCredential, get_bearer_token_provider
 from langchain_openai import AzureChatOpenAI, AzureOpenAIEmbeddings
 from openai import AzureOpenAI
 from langchain.prompts import ChatPromptTemplate, MessagesPlaceholder
-import pandas as pd
+
 import numpy as np
 import faiss
-import time
-import re
 
 HOST = SERVER_NAME+'/'+HOST_HTTP_PATH
 
-db = SQLDatabase.from_databricks(catalog=database, schema=Schema, engine_args={"pool_pre_ping": True},host=HOST,api_token=DATABRICKS_TOKEN,warehouse_id=warehouse_id)
+db = SQLDatabase.from_databricks(catalog=database, schema="pla_pd_demo", engine_args={"pool_pre_ping": True},host=HOST,api_token=DATABRICKS_TOKEN,warehouse_id=warehouse_id)
 
 IGNORED_COLUMNS = {
     "#", "Detailed Table Information", "Catalog", "Database", "Table",
@@ -35,7 +33,7 @@ def extract_table_metadata(table_name):
 
     for row in processed_output:
         if row[0].strip().lower() == "comment":
-            table_description = row[1]
+            table_description = row[1]  # Extract table description
         elif len(row) == 3 and row[0].strip() and row[0].strip() not in IGNORED_COLUMNS:
             column_details.append({
                 "name": row[0], 
@@ -49,33 +47,60 @@ def extract_table_metadata(table_name):
         "columns": column_details
     }
 
+tables = db.get_usable_table_names()
+table_metadata = [extract_table_metadata(table) for table in tables]
+
 def clean_metadata(table_metadata):
-    """Clean metadata by removing irrelevant columns."""
     for table in table_metadata:
         table["columns"] = [
             col for col in table["columns"] if col["name"].strip() and col["name"] != "# Detailed Table Information"
         ]
     return table_metadata
 
-# Initialize Azure credentials and clients
+clean_metadata_list = clean_metadata(table_metadata)
+
+# Define the required scope
 scope = "https://cognitiveservices.azure.com/.default"
+
+# Initialize the credential
 credential = DefaultAzureCredential()
+
 token_provider = get_bearer_token_provider(credential, scope)
 
-llm_instance = AzureChatOpenAI(
-    azure_deployment="gpt-4o-mini",
+# Ensure you request a token with the correct scope
+token = credential.get_token(scope)
+
+client = openai.AzureOpenAI(
     api_version=api_version,
-    temperature=0,
-    max_tokens=None,
-    timeout=None,
-    max_retries=5,
-    verbose=True,
     azure_endpoint=azure_endpoint,
     azure_ad_token_provider=token_provider
 )
 
+embedding_model = AzureOpenAIEmbeddings(
+    azure_deployment="text-embedding-ada-002",  # Set the correct Azure deployment name
+    azure_endpoint=azure_endpoint,
+    api_version=api_version,
+    azure_ad_token_provider=token_provider
+)
+
+llm_instance = AzureChatOpenAI(
+    azure_deployment="gpt-4o-mini",# "gpt-4o-mini", #"gpt-35-turbo",  # or your deployment
+    api_version= api_version,  # or your api version
+    temperature=0,
+    #seed = 0,
+    max_tokens=None,
+    #model_version="2024-07-18",
+    timeout=None,
+    max_retries=5,
+    verbose=True,
+    azure_endpoint = azure_endpoint,
+    azure_ad_token_provider=token_provider
+)
+
 def get_embeddings(text):
-    """Get embeddings for text using Azure OpenAI."""
+    token_provider = get_bearer_token_provider(
+    DefaultAzureCredential(), scope)
+
     client = AzureOpenAI(
         api_version=api_version,
         azure_endpoint=azure_endpoint,
@@ -86,14 +111,13 @@ def get_embeddings(text):
         input=text
     )
     return response.data[0].embedding
-
 # Initialize table metadata and FAISS index
 print("Loading table metadata...")
 tables = db.get_usable_table_names()
 table_metadata = [extract_table_metadata(table) for table in tables]
 clean_metadata_list = clean_metadata(table_metadata)
 
-# Create FAISS index
+# Convert each table's metadata into a structured text format
 table_texts = [
     f"Table: {table['table_name']}\nDescription: {table['description']}\nColumns: {table['columns']}"
     for table in clean_metadata_list
@@ -101,26 +125,28 @@ table_texts = [
 
 print("Creating embeddings and FAISS index...")
 embeddings = np.array([get_embeddings(text) for text in table_texts])
-dimension = embeddings.shape[1]
+dimension = embeddings.shape[1]  # Get embedding dimension
 index = faiss.IndexFlatL2(dimension)
 index.add(embeddings)
 
 def query_faiss(query_text, k=3):
     """Uses FAISS to find relevant tables based on query embeddings."""
     query_embedding = np.array(get_embeddings(query_text)).reshape(1, -1).astype("float32")
+
     distances, indices = index.search(query_embedding, k)
-    
-    relevant_table_metadata = [clean_metadata_list[i] for i in indices[0]]
-    
+
+    relevant_table_metadata = [clean_metadata_list[i] for i in indices[0]]  # Direct lookup
+
     # Extract table names for output
     relevant_table_names = [table['table_name'] for table in relevant_table_metadata]
     
+    # Format extracted metadata for readability
     formatted_metadata = "\n\n".join(
         f"**Table:** {table['table_name']}\n**Description:** {table['description']}\n**Columns:**\n" +
         "\n".join([f"- {col['name']} ({col['type']}): {col['description']}" for col in table["columns"]])
         for table in relevant_table_metadata
     )
-    
+
     return formatted_metadata, relevant_table_names
 
 # Define prompt template
@@ -137,7 +163,7 @@ Do not try to pull table information from database and only use the table_info p
     - Be sure not to query for columns that do not exist in the tables and use alias only where required.\
     - Include unit_name, plant_name, actual_energy, daily_target_volume, and equipment_name in query if mentioned.\
     - Always use the column 'unit_name' associated with the unit in the generated query.\
-    - Always use the column 'plant_name' in sql query generation whenever asked for plant or plant Names in user query. \
+    - Always use the column 'plant_name' in sql query generation whenever asked for plant information or plant names in user query. \
     - Always use the column 'actual_energy' associated with the energy consumption in the generated query.\
     - Always use the column 'daily_target_volume' associated with the production target, target volumne in the generated query.\
     - Always use the column 'unit_name' associated with the unit name [('Ammonia-Y1',), ('Urea-Y4',), ('Urea-Y2',), ('Mine-8',), ('Urea-Y1',), ('LNG-7',), ('Urea-Y3',), ('LNG-5',), ('Ammonia-Y3',), ('Ammonia-Y2',), ('Ammonia-Y4',), ('LNG-6',)] .\
@@ -175,7 +201,14 @@ Do not try to pull table information from database and only use the table_info p
 
 7. If you do not know the answer, reply as follows: {{"answer": "I do not know."}}
 
-8. Remove sql keyword from query generated. 
+8. Remove sql keyword from query generated.
+
+9. Always look for lowercase words in where clause.For example, if we \
+want to look for equipment name as gas meter, the query should have \
+lower(equipment_name) = 'gas meter'
+
+10. Always check for the available examples in the table_info to verify \
+if the variable being used in sql statement even has that type of value.
 
 ===Response Format
 You are required to use the following format, each taking one line:
@@ -209,7 +242,7 @@ def agent_trigger(question):
         prompt=string_prompt,
         agent_type="openai-tools",
         handle_parsing_errors=True,
-        verbose=False
+        verbose=True
     )
     
     human_response = dbr_agent.invoke({
@@ -224,111 +257,3 @@ def agent_trigger(question):
     human_response["relevant_tables"] = relevant_tables
     return human_response
 
-def parse_response(response_output):
-    """Parse the agent response to extract question, SQL query, and answer."""
-    try:
-        # Try to extract using regex patterns
-        question_match = re.search(r"Question:\s*(.*?)\n", response_output, re.DOTALL)
-        query_match = re.search(r"SQLQuery:\s*(.*?)\n", response_output, re.DOTALL)
-        answer_match = re.search(r"Answer:\s*(.*)", response_output, re.DOTALL)
-
-        question = question_match.group(1).strip() if question_match else "Unknown Question"
-        sql_query = query_match.group(1).strip() if query_match else "Unknown Query"
-        answer = answer_match.group(1).strip() if answer_match else "No answer available"
-
-        return question, sql_query, answer
-    except Exception as e:
-        print(f"Error parsing response: {e}")
-        return "Parse Error", "Parse Error", "Parse Error"
-
-def test_agent(query):
-    """Test the agent with a query and return parsed results with timing."""
-    start_time = time.time()
-    response = agent_trigger(query)
-    end_time = time.time()
-    
-    response_time = round(end_time - start_time, 2)
-    response_output = response["output"].strip()
-    relevant_tables = response.get("relevant_tables", [])
-    
-    question, sql_query, answer = parse_response(response_output)
-    
-    return {
-        'Question': query,
-        'SQL_Query': sql_query,
-        'Answer': answer,
-        'Response_Time': response_time,
-        'Relevant_Tables': ', '.join(relevant_tables)  # Join table names with comma
-    }
-
-# Test questions
-questions = [
-    "which plant has the highest actual production in December 2024?",
-    "which plant has the lowest actual production in December 2024?",
-    "which 3 plants used the most energy in 2024?",
-    "What was the most energy efficient plant in 2024?",
-    "which asset caused the most lost volume in 2024?",
-    "What is the lost volume for gas meter in 2024?",
-    "What unit name had the lowest production in 2024?",
-    "What unit name had the largest production in 2024?",
-    "Which plant had the least production in 2024?",
-    "What are the units belonging to Y1 plant?",
-    "Which plant type had the largest production in 2024?",
-    "Provide the name and energy consumption for the top 3 plants with highest energy consumption in January 2024.",
-    "Provide the plant name and total energy consumption for the 3 unit ids with highest energy consumption in January 2024.",
-    "For All plants, give a breakdown of total energy consumed for each unit.",
-    "For Plants Y1 and Y4, give a breakdown of total energy consumed for each unit.",
-    "For All plants, give a breakdown of daily average of energy consumed for each unit.",
-    "Which plants have units with average energy consumption less than 500. Provide unit name and daily average consumption.",
-    "For LNG-5, which days in January 2024, did we have energy consumption more than 250.",
-    "Which days did LNG-5 not meet target volume?",
-    "Which days did LNG-5 use more energy than its average energy consumption",
-    "Which days did LNG-5 use more energy than its average energy consumption and also not meet its production target?",
-    "which plants are inefficient?",
-    "Which day was the worst in terms of energy usage and production?"
-]
-
-def run_tests_and_save_excel():
-    """Run all tests and save results to Excel file."""
-    print("Starting agent tests...")
-    results = []
-    
-    for idx, question in enumerate(questions, start=1):
-        print(f"Processing question {idx}/{len(questions)}: {question[:50]}...")
-        try:
-            result = test_agent(question)
-            results.append(result)
-        except Exception as e:
-            print(f"Error processing question {idx}: {e}")
-            results.append({
-                'Question': question,
-                'SQL_Query': f"Error: {str(e)}",
-                'Answer': f"Error: {str(e)}",
-                'Response_Time': 0,
-                'Relevant_Tables': "Error retrieving tables"
-            })
-    
-    # Create DataFrame and save to Excel
-    df = pd.DataFrame(results)
-    output_file = "agent_responses.xlsx"
-    
-    try:
-        df.to_excel(output_file, index=False, engine='openpyxl')
-        print(f"Results saved to {output_file}")
-        
-        # Print summary
-        print(f"\nSummary:")
-        print(f"Total questions processed: {len(results)}")
-        print(f"Average response time: {df['Response_Time'].mean():.2f} seconds")
-        print(f"Max response time: {df['Response_Time'].max():.2f} seconds")
-        print(f"Min response time: {df['Response_Time'].min():.2f} seconds")
-        
-    except Exception as e:
-        print(f"Error saving to Excel: {e}")
-        # Fallback to CSV
-        csv_file = "agent_responses.csv"
-        df.to_csv(csv_file, index=False)
-        print(f"Results saved to {csv_file} instead")
-
-if __name__ == "__main__":
-    run_tests_and_save_excel()
